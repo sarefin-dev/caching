@@ -12,6 +12,11 @@ cp .env.example .env
 nano .env
 ```
 
+## Celery worker running
+```bash
+celery -A app.workers.tasks worker --pool=solo --loglevel=info
+```
+
 ### Sequence diagram for reading _settings_ with respect to root api **/**
 ```mermaid
 sequenceDiagram

@@ -51,7 +51,7 @@ def send_order_confirmation(self, order_id: int):
         
         # In production, use actual email service (SendGrid, SES, etc.)
         # For now, just log
-        logger.info(f"✉️ Email sent for order {order_id}")
+        logger.info(f"Email sent for order {order_id}")
         
         return {"status": "sent", "order_id": order_id}
         

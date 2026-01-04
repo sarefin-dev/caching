@@ -7,8 +7,13 @@ def strftime():
     return func.strftime("%Y-%m-%d %H:%M:%S", "now")
 
 
-def utc_now():
-    return datetime.now(timezone.utc)
+def utc_now() -> datetime:
+    """
+    Return current UTC time as timezone-NAIVE datetime
+    
+    PostgreSQL TIMESTAMP WITHOUT TIME ZONE expects naive datetimes
+    """
+    return datetime.utcnow()
 
 
 class BaseSqlModel(SQLModel):

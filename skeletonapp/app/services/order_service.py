@@ -40,9 +40,8 @@ class OrderService:
             logger.info(f"Idempotent order request: {idempotency_key}")
             return self._to_response(existing_order, "Order already exists")
 
-        # TRANSACTIONAL PROCESSING: Create order + process payment
-        async with session.begin_nested():  # Savepoint
-            try:
+        try:
+            async with session.begin_nested():  # Savepoint - auto-commits on success
                 # 1. Create order
                 order = Order(
                     idempotency_key=idempotency_key,
@@ -55,6 +54,8 @@ class OrderService:
                 session.add(order)
                 await session.flush()  # Get order.id
 
+                logger.info("Processing order...")
+
                 # 2. Process payment (in same transaction!)
                 payment_request = PaymentRequest(
                     user_id=order_request.user_id,
@@ -63,31 +64,34 @@ class OrderService:
                     idempotency_key=f"ord_{order.id}_pay",
                 )
 
+                logger.info("Processing payment...")
+
                 payment_response = await self.payment_service.process_payment(
                     payment_request,
                     session,  # Same session = same transaction!
+                    auto_commit=False,
                 )
+
+                logger.info("Payment processed successfully")
 
                 # 3. Update order with payment
                 order.payment_id = payment_response.id
                 order.status = "confirmed"
                 order.updated_at = utc_now()
 
-                await session.commit()  # Commit both order + payment!
+            await session.refresh(order)
 
-                logger.info(f"Order created successfully: {order.id}")
+            logger.info(f"Order created successfully: {order.id}")
 
-                # Queue notification email (async, after commit)
-                from app.workers.tasks import send_order_confirmation
+            # Queue notification email (async, after commit)
+            from app.workers.tasks import send_order_confirmation
+            send_order_confirmation.delay(order.id)
 
-                send_order_confirmation.delay(order.id)
+            return self._to_response(order, "Order created successfully")
 
-                return self._to_response(order, "Order created successfully")
-
-            except Exception as e:
-                logger.error(f"Order creation failed: {e}")
-                await session.rollback()  # Rollback both order + payment!
-                raise
+        except Exception as e:
+            logger.error(f"❌ Order creation failed: {e}", exc_info=True)
+            raise
 
     async def _find_by_idempotency_key(
         self, session: AsyncSession, idempotency_key: str

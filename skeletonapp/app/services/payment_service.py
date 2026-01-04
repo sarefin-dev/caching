@@ -1,7 +1,6 @@
-# app/services/payment_service.py
+# app/services/payment_service.py - FIXED VERSION
 import logging
-
-import httpx
+import stripe
 from app.core.config import get_settings
 from app.dto.payment_dto import PaymentRequest, PaymentResponse
 from app.models.base_model import utc_now
@@ -19,33 +18,34 @@ from tenacity import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Configure Stripe
+stripe.api_key = settings.payment_gateway_api_key
+
 
 class PaymentGatewayError(Exception):
     """Custom exception for payment gateway failures"""
-
     pass
 
 
 class PaymentService:
     """
-    Payment processing service with:
-    - Idempotency
-    - Deduplication
-    - Retry with backoff
-    - Transactions
-    - Timeouts
+    Payment processing service with Stripe
     """
 
     async def process_payment(
-        self, payment_request: PaymentRequest, session: AsyncSession
+        self,
+        payment_request: PaymentRequest,
+        session: AsyncSession,
+        auto_commit: bool = True  # ✅ NEW: Control commit behavior
     ) -> PaymentResponse:
         """
         Process payment with full reliability patterns
-
-        1. Check idempotency (already processed?)
-        2. Create payment record (transaction)
-        3. Call payment gateway (retry + timeout)
-        4. Update payment status (transaction)
+        
+        Args:
+            payment_request: Payment details
+            session: Database session
+            auto_commit: If True (default), commits transaction.
+                        If False, only flushes (for use within another transaction).
         """
         # Generate idempotency key if not provided
         idempotency_key = (
@@ -53,7 +53,7 @@ class PaymentService:
             or self._generate_idempotency_key(payment_request)
         )
 
-        # IDEMPOTENCY CHECK: Return existing payment if already processed
+        # IDEMPOTENCY CHECK
         existing_payment = await self._find_by_idempotency_key(session, idempotency_key)
         if existing_payment:
             logger.info(f"Idempotent request detected: {idempotency_key}")
@@ -61,28 +61,42 @@ class PaymentService:
                 existing_payment, "Payment already processed (idempotent)"
             )
 
-        # TRANSACTIONAL PROCESSING: Create payment in database
+        # TRANSACTIONAL PROCESSING
         payment = await self._create_payment_record(
-            payment_request, idempotency_key, session
+            payment_request, idempotency_key, session, auto_commit=False  # ✅ Never commit here
         )
 
         try:
-            # RETRY WITH BACKOFF: Call external payment gateway
-            transaction_id = await self._charge_payment_gateway(payment_request)
+            # Charge via Stripe SDK
+            charge = await self._charge_with_stripe(payment_request, idempotency_key)
 
-            # DEDUPLICATION CHECK: Ensure transaction_id is unique
-            if await self._transaction_exists(session, transaction_id):
-                logger.warning(f"Duplicate transaction detected: {transaction_id}")
+            # DEDUPLICATION CHECK
+            if await self._transaction_exists(session, charge.id):
+                logger.warning(f"Duplicate transaction detected: {charge.id}")
                 payment.status = "failed"
                 payment.error_message = "Duplicate transaction"
-                await session.commit()
+                payment.updated_at = utc_now()
+                
+                # ✅ FIXED: Conditional commit
+                if auto_commit:
+                    await session.commit()
+                else:
+                    await session.flush()
+                    
                 raise ValueError("Duplicate transaction detected")
 
             # Update payment with success
-            payment.transaction_id = transaction_id
+            payment.transaction_id = charge.id
             payment.status = "completed"
+            payment.gateway_response = str(charge)
             payment.updated_at = utc_now()
-            await session.commit()
+            
+            # ✅ FIXED: Conditional commit
+            if auto_commit:
+                await session.commit()
+                await session.refresh(payment)  # Only refresh after commit
+            else:
+                await session.flush()  # Just flush to persist changes
 
             logger.info(f"Payment processed successfully: {payment.id}")
             return self._to_response(payment, "Payment processed successfully")
@@ -94,62 +108,86 @@ class PaymentService:
             payment.status = "failed"
             payment.error_message = str(e)
             payment.updated_at = utc_now()
-            await session.commit()
+            
+            # ✅ FIXED: Conditional commit
+            if auto_commit:
+                await session.commit()
+            else:
+                await session.flush()
 
             raise
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((PaymentGatewayError, httpx.TimeoutException)),
+        retry=retry_if_exception_type(
+            (stripe.error.APIConnectionError, stripe.error.RateLimitError)
+        ),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
-    async def _charge_payment_gateway(self, payment_request: PaymentRequest) -> str:
+    async def _charge_with_stripe(
+        self, payment_request: PaymentRequest, idempotency_key: str
+    ):
         """
-        Call external payment gateway with:
-        - TIMEOUT: Don't wait forever
-        - RETRY WITH BACKOFF: Automatic retries with exponential backoff
+        Charge payment via Stripe API
         """
-        timeout = httpx.Timeout(settings.payment_gateway_timeout)
+        try:
+            logger.info(f"Creating Stripe charge for ${payment_request.amount}")
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                logger.info(f"Calling payment gateway for ${payment_request.amount}")
+            payment_intent = stripe.PaymentIntent.create(
+                amount=int(payment_request.amount * 100),  # cents
+                currency=payment_request.currency.lower(),
+                payment_method_types=["card"],
+                description=f"Payment for user {payment_request.user_id}",
+                metadata={
+                    "user_id": str(payment_request.user_id),
+                    "idempotency_key": idempotency_key,
+                },
+                idempotency_key=idempotency_key,
+                confirm=True,
+                payment_method="pm_card_visa",  # Test payment method
+            )
 
-                response = await client.post(
-                    f"{settings.payment_gateway_url}/charges",
-                    json={
-                        "amount": int(payment_request.amount * 100),  # cents
-                        "currency": payment_request.currency,
-                        "source": "tok_visa",  # Demo token
-                    },
-                    headers={
-                        "Authorization": f"Bearer {settings.payment_gateway_api_key}"
-                    },
-                )
+            logger.info(f"Stripe PaymentIntent created: {payment_intent.id}")
+            return payment_intent
 
-                if response.status_code not in [200, 201]:
-                    raise PaymentGatewayError(
-                        f"Gateway returned {response.status_code}: {response.text}"
-                    )
+        except stripe.error.CardError as e:
+            logger.error(f"Card declined: {e.user_message}")
+            raise PaymentGatewayError(f"Card declined: {e.user_message}")
 
-                result = response.json()
-                return result.get("id", f"txn_{payment_request.user_id}")
+        except stripe.error.RateLimitError as e:
+            logger.error(f"Stripe rate limit: {e}")
+            raise
 
-            except httpx.TimeoutException:
-                logger.error("Payment gateway timeout")
-                raise
-            except httpx.HTTPError as e:
-                logger.error(f"Payment gateway HTTP error: {e}")
-                raise PaymentGatewayError(str(e))
+        except stripe.error.InvalidRequestError as e:
+            logger.error(f"Invalid request: {e}")
+            raise PaymentGatewayError(f"Invalid request: {e}")
+
+        except stripe.error.AuthenticationError as e:
+            logger.error(f"Stripe authentication failed: {e}")
+            raise PaymentGatewayError("Payment gateway authentication failed")
+
+        except stripe.error.APIConnectionError as e:
+            logger.error(f"Network error: {e}")
+            raise
+
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe error: {e}")
+            raise PaymentGatewayError(f"Payment processing error: {e}")
 
     async def _create_payment_record(
         self,
         payment_request: PaymentRequest,
         idempotency_key: str,
         session: AsyncSession,
+        auto_commit: bool = False  # ✅ NEW: Don't commit by default
     ) -> Payment:
-        """Create initial payment record in database"""
+        """
+        Create initial payment record in database
+        
+        Args:
+            auto_commit: If True, commits. If False, only flushes.
+        """
         payment = Payment(
             idempotency_key=idempotency_key,
             user_id=payment_request.user_id,
@@ -159,8 +197,13 @@ class PaymentService:
         )
 
         session.add(payment)
-        await session.commit()
-        await session.refresh(payment)
+        
+        # ✅ FIXED: Conditional commit
+        if auto_commit:
+            await session.commit()
+            await session.refresh(payment)
+        else:
+            await session.flush()  # Just get the ID
 
         return payment
 
@@ -185,7 +228,6 @@ class PaymentService:
     def _generate_idempotency_key(self, payment_request: PaymentRequest) -> str:
         """Generate idempotency key from request"""
         import uuid
-
         return f"pay_{payment_request.user_id}_{uuid.uuid4().hex[:16]}"
 
     def _to_response(self, payment: Payment, message: str) -> PaymentResponse:

@@ -1,92 +1,105 @@
-# app/core/logging_config.py - SIMPLIFIED
+# app/core/logging_config.py - RECOMMENDED COLORLOG SETUP
 import logging.config
 import sys
 from pathlib import Path
 
-# Create logs directory
 LOGS_DIR = Path("logs")
 LOGS_DIR.mkdir(exist_ok=True)
 
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    
-    "formatters": {
-        "default": {
-            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-        "detailed": {
-            "format": (
-                "%(asctime)s - %(name)s - %(levelname)s - "
-                "%(filename)s:%(lineno)d - %(message)s"
-            ),
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-        # ✅ Removed JSON formatter - we're not using it
-    },
-    
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "level": "INFO",
-            "formatter": "default",
-            "stream": sys.stdout,  # ✅ Changed from "ext://sys.stdout"
-        },
-        "file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "level": "INFO",
-            "formatter": "detailed",
-            "filename": "logs/app.log",
-            "maxBytes": 10485760,  # 10MB
-            "backupCount": 5,
-            "encoding": "utf8",
-        },
-        "error_file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "level": "ERROR",
-            "formatter": "detailed",
-            "filename": "logs/error.log",
-            "maxBytes": 10485760,  # 10MB
-            "backupCount": 5,
-            "encoding": "utf8",
-        },
-    },
-    
-    "root": {
-        "level": "INFO",
-        "handlers": ["console", "file"],
-    },
-    
-    "loggers": {
-        "app": {
-            "level": "INFO",
-            "handlers": ["console", "file", "error_file"],
-            "propagate": False,
-        },
-        # SQLAlchemy logger (optional - shows SQL queries)
-        "sqlalchemy.engine": {
-            "level": "WARNING",  # Change to INFO to see all SQL
-            "handlers": ["console"],
-            "propagate": False,
-        },
-        # Uvicorn loggers
-        "uvicorn": {
-            "level": "INFO",
-            "handlers": ["console"],
-            "propagate": False,
-        },
-        "uvicorn.access": {
-            "level": "INFO",
-            "handlers": ["console"],
-            "propagate": False,
-        },
-    }
-}
-
 
 def setup_logging():
-    """Configure application logging"""
+    """
+    Configure logging with beautiful colored console output
+    """
+    
+    LOGGING_CONFIG = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        
+        "formatters": {
+            # Beautiful colored console
+            "colored": {
+                "()": "colorlog.ColoredFormatter",
+                "format": (
+                    "%(log_color)s%(asctime)s%(reset)s | "
+                    "%(blue)s%(name)-25s%(reset)s | "
+                    "%(log_color)s%(levelname)-8s%(reset)s | "
+                    "%(message)s"
+                ),
+                "datefmt": "%H:%M:%S",  # Just time for console
+                "log_colors": {
+                    "DEBUG": "cyan",
+                    "INFO": "green",
+                    "WARNING": "yellow",
+                    "ERROR": "red",
+                    "CRITICAL": "bold_red",
+                },
+            },
+            # Detailed for files
+            "file": {
+                "format": (
+                    "%(asctime)s | %(name)-25s | %(levelname)-8s | "
+                    "[%(filename)s:%(lineno)d] | %(message)s"
+                ),
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
+        },
+        
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "level": "DEBUG",
+                "formatter": "colored",
+                "stream": sys.stdout,
+            },
+            "file": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "level": "INFO",
+                "formatter": "file",
+                "filename": str(LOGS_DIR / "app.log"),
+                "maxBytes": 10_485_760,
+                "backupCount": 5,
+                "encoding": "utf8",
+            },
+            "error_file": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "level": "ERROR",
+                "formatter": "file",
+                "filename": str(LOGS_DIR / "error.log"),
+                "maxBytes": 10_485_760,
+                "backupCount": 5,
+                "encoding": "utf8",
+            },
+        },
+        
+        "loggers": {
+            "app": {
+                "level": "DEBUG",
+                "handlers": ["console", "file", "error_file"],
+                "propagate": False,
+            },
+            "sqlalchemy.engine": {
+                "level": "WARNING",
+                "handlers": ["file"],
+                "propagate": False,
+            },
+            "uvicorn": {
+                "level": "INFO",
+                "handlers": ["console"],
+                "propagate": False,
+            },
+        },
+        
+        "root": {
+            "level": "INFO",
+            "handlers": ["console", "file"],
+        }
+    }
+    
     logging.config.dictConfig(LOGGING_CONFIG)
+    
     logger = logging.getLogger(__name__)
-    logger.info("Logging configured successfully")
+    logger.info("Colorlog enabled - logs are now beautiful!")
+    logger.debug("Debug mode active")
+    logger.warning("This is a warning")
+    logger.error("This is an error")

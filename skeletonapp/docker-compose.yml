@@ -62,6 +62,15 @@ services:
       - postgres
     volumes:
       - ./app:/app/app
+  
+  topz:
+    image: brendanburns/topz:db0fa58
+    command: /server --addr=0.0.0.0:8080
+    pid: "service:api"  # Share PID namespace with api service
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
 
 volumes:
   postgres_data:
